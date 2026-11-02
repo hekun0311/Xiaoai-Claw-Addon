@@ -176,7 +176,8 @@ def backup_data(old, backup):
 
 
 def check_ready():
-    for _ in range(90):
+    print('等待新容器健康，最多 10 分钟（OpenClaw 可能先执行数据库离线维护）……', flush=True)
+    for attempt in range(300):
         state = inspect()['State']
         if not state.get('Running'):
             raise DeployError('新容器退出。')
@@ -185,8 +186,10 @@ def check_ready():
             run(['docker', 'exec', CONTAINER, 'node', '-e',
                  "(async()=>{const fs=require('fs');const root='/home/node/.openclaw/extensions/openclaw-plugin-xiaoai-cloud/';if(require(root+'package.json').version!=='1.1.0'||!fs.existsSync(root+'dist/src/speech.js'))process.exit(1);for(const [p,ok] of [['/healthz',[200]],['/',[200]],['/api/xiaoai-cloud/api/speech/settings',[401]]]){const r=await fetch('http://127.0.0.1:18789'+p,{redirect:'manual',signal:AbortSignal.timeout(5000)});if(!ok.includes(r.status))process.exit(1)}})().catch(()=>process.exit(1))"])
             return
+        if attempt and attempt % 15 == 0:
+            print(f'仍在等待容器健康，已检查 {attempt * 2} 秒。', flush=True)
         time.sleep(2)
-    raise DeployError('容器健康检查超时。')
+    raise DeployError('新容器健康检查等待 10 分钟后仍未通过。')
 
 
 def switch(old, candidate, backup):
@@ -204,7 +207,9 @@ def switch(old, candidate, backup):
         private_write(ENTRY_FILE, 'name: openclaw-xiaoai\ninclude:\n  - path: /opt/openclaw-xiaoai/runtime/compose.json\n')
         compose('up', '-d', '--no-build', '--pull', 'never', SERVICE)
         check_ready()
-    except Exception:
+    except Exception as error:
+        reason = str(error) if isinstance(error, DeployError) else '部署操作失败（详细内容未输出，避免泄漏配置）。'
+        print('切换失败原因：' + reason, file=sys.stderr, flush=True)
         if stopped:
             # 旧配置可能使用 latest，回滚也固定到更新前的本地镜像 ID。
             rollback = json.loads((backup / 'model.json').read_text(encoding='utf-8'))
@@ -219,12 +224,15 @@ def switch(old, candidate, backup):
 
 
 def check_ready_rollback():
-    for _ in range(90):
+    print('旧镜像已恢复，等待健康检查，最多 10 分钟；不会覆盖数据库。', flush=True)
+    for attempt in range(300):
         state = inspect()['State']
         if state.get('Running') and state.get('Health', {}).get('Status') == 'healthy':
             return
+        if attempt and attempt % 15 == 0:
+            print(f'仍在等待旧容器健康，已检查 {attempt * 2} 秒。', flush=True)
         time.sleep(2)
-    raise DeployError('旧版本恢复后健康检查未通过，请保留备份并检查容器。')
+    raise DeployError('旧镜像已恢复，但健康检查等待 10 分钟后仍未通过；请保留备份并检查容器。')
 
 
 def deploy(action):

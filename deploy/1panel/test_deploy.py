@@ -79,6 +79,20 @@ class DeployTests(unittest.TestCase):
                 d.build('image', 'digest', 'revision')
             compose.assert_not_called()
 
+    def test_health_wait_allows_maintenance_longer_than_three_minutes(self):
+        for check in (d.check_ready, d.check_ready_rollback):
+            states = [{'State': {'Running': True, 'Health': {'Status': 'unhealthy'}}}] * 100
+            states.append({'State': {'Running': True, 'Health': {'Status': 'healthy'}}})
+            with patch.object(d, 'inspect', side_effect=states), patch.object(d.time, 'sleep') as sleep, patch.object(d, 'run'), patch('builtins.print'):
+                check()
+                self.assertEqual(sleep.call_count, 100)
+
+    def test_health_wait_still_fails_after_ten_minutes(self):
+        with patch.object(d, 'inspect', return_value={'State': {'Running': True, 'Health': {'Status': 'unhealthy'}}}), patch.object(d.time, 'sleep') as sleep, patch('builtins.print'):
+            with self.assertRaisesRegex(d.DeployError, '10 分钟'):
+                d.check_ready()
+            self.assertEqual(sleep.call_count, 300)
+
     def test_health_failure_restores_previous_image_and_settings_without_restoring_data(self):
         backup = self.root / 'backup'
         backup.mkdir()
