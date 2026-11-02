@@ -4,7 +4,7 @@ USER root
 WORKDIR /build
 COPY package.json package-lock.json tsconfig.json index.ts ./
 COPY src ./src
-RUN npm ci && npm run build && npm prune --omit=dev
+RUN npm ci --include=dev && npm run build && npm prune --omit=dev
 COPY openclaw.plugin.json README.md ./
 COPY assets ./assets
 COPY scripts ./scripts
