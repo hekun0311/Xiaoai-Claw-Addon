@@ -4,6 +4,8 @@
 
 <p align="center">将小爱音箱接入 OpenClaw </p>
 
+本 fork 增加火山声音复刻 / 系统音色、手动获取设备列表、OpenClaw 2026.10.8 agent 配置修复，以及统一更新部署。参见 [1Panel 接入与音色配置](deploy/1panel/README.md)。默认继续使用小爱原声，保存设置不调用收费服务。
+
 <p align="center">
   <img src="https://img.shields.io/badge/OpenClaw-Plugin-1f6feb?style=flat-square" alt="OpenClaw Plugin">
   <img src="https://img.shields.io/badge/Node.js-22.22.3%2B%20%7C%2024.15%2B%20%7C%2025.9%2B-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js 22.22.3+ | 24.15+ | 25.9+">

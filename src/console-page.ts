@@ -211,11 +211,11 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                     <span class="micro-label">状态</span>
                     <div class="status-line" id="deviceStatusText">连接中</div>
                   </div>
-                  <button class="soft-btn compact-btn" type="button" id="toggleDeviceListBtn">切换设备</button>
+                  <button class="soft-btn compact-btn" type="button" id="toggleDeviceListBtn">获取设备列表</button>
                 </div>
 
                 <div class="device-list-shell" id="deviceListShell" hidden>
-                  <div class="device-list" id="deviceList"></div>
+                  <div class="device-list" id="deviceList">尚未获取设备列表，请点击上方按钮。</div>
                 </div>
               </section>
 
@@ -409,6 +409,31 @@ ${renderSharedHead("XiaoAI Cloud Console", assetBasePath)}
                     <span>暂停接管对话</span>
                   </button>
                 </div>
+              </section>
+
+              <section class="surface control-card control-card-speech">
+                <div class="card-copy"><span class="micro-label">语音音色</span>
+                  <div class="card-meta">选择回答音色。火山模式跳过过渡提示；保存不会调用语音服务。</div></div>
+                <label class="field-shell"><span class="micro-label">语音引擎</span>
+                  <select class="text-field" id="speechEngine"><option value="xiaomi">小爱原声</option><option value="volcano">火山豆包</option></select></label>
+                <div id="speechVolcanoFields" hidden>
+                  <label class="field-shell"><span class="micro-label">API Key</span>
+                    <input class="text-field" id="speechApiKey" type="password" autocomplete="new-password" placeholder="留空保留已保存的密钥" /></label>
+                  <div class="card-meta" id="speechKeyStatus">正在读取密钥状态…</div>
+                  <button class="soft-btn compact-btn" id="speechClearKey" type="button">清除已保存密钥（保存后生效）</button>
+                  <label class="field-shell"><span class="micro-label">模型服务</span>
+                    <select class="text-field" id="speechResource"><option value="seed-icl-2.0">声音复刻 2.0</option><option value="seed-tts-2.0">系统音色 2.0</option></select></label>
+                  <label class="field-shell" id="speechModelField"><span class="micro-label">复刻合成效果</span>
+                    <select class="text-field" id="speechModel"><option value="seed-tts-2.0-standard">标准版</option><option value="seed-tts-2.0-expressive">增强版</option></select></label>
+                  <label class="field-shell"><span class="micro-label">音色 ID</span>
+                    <input class="text-field" id="speechSpeaker" type="text" autocomplete="off" placeholder="填写火山控制台中的完整音色 ID" /></label>
+                </div>
+                <div class="card-meta" id="speechStatus" role="status">正在读取语音设置…</div>
+                <div class="route-card-actions">
+                  <button class="soft-btn compact-btn" id="speechSave" type="button" disabled>保存音色</button>
+                  <button class="soft-btn compact-btn" id="speechTest" type="button" disabled>测试音色</button>
+                </div>
+                <div class="card-meta">测试使用已保存的配置，会实际合成并在音箱播放；火山可能计费。</div>
               </section>
 
               <section class="surface control-card control-card-wakeword">

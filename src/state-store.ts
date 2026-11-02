@@ -145,7 +145,7 @@ export function defaultConsoleStatePath(baseStateDir?: string): string {
     return path.join(defaultStateBaseDir(baseStateDir), "console.json");
 }
 
-async function writePrivateJsonFile(filePath: string, value: unknown) {
+export async function writePrivateJsonFile(filePath: string, value: unknown) {
     await mkdir(path.dirname(filePath), { recursive: true });
     const content = JSON.stringify(value, null, 2);
     const temporaryPath = `${filePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;

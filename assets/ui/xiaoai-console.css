@@ -6937,3 +6937,13 @@ body[data-page="console"] .mode-btn span {
     min-width: 0;
   }
 }
+/* Speech settings belong to this control card only. */
+.control-card-speech #speechVolcanoFields {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.control-card-speech .field-shell,
+.control-card-speech .text-field {
+  min-width: 0;
+}

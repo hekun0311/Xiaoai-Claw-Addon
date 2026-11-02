@@ -1,4 +1,5 @@
-import { createHash, createHmac, randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
+import { gunzipSync } from "zlib";
 import { execFile } from "child_process";
 import {
     appendFile,
@@ -60,6 +61,7 @@ interface XiaomiResponseLike {
     ok: boolean;
     url: string;
     text(): Promise<string>;
+    headers?: { get(name: string): string | null };
 }
 
 interface XiaomiRequestOptions {
@@ -197,7 +199,7 @@ const MIOT_SPEC_INSTANCE_URL = "https://miot-spec.org/miot-spec-v2/instance?type
 
 const ACCOUNT_SDK_VERSION = "3.8.6";
 const MIIO_USER_AGENT =
-    "iOS-14.4-6.0.103-iPhone12,3--D7744744F7AF32F0544445285880DD63E47D9BE9-8816080-84A3F44E137B71AE-iPhone";
+    "MICO/AndroidApp/@SHIP.TO.2A2FE0D7@/2.4.40";
 
 const RANDOM_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 const TRACE_TEXT_LIMIT = 1200;
@@ -954,6 +956,17 @@ export function defaultTokenStorePath(
 }
 
 export class XiaomiAccountClient {
+    private static readonly deviceLists = new Map<string, {
+        pending?: Promise<any>;
+        value?: any;
+        expiresAt?: number;
+    }>();
+    private static readonly requestCooldowns = new Map<string, number>();
+
+    private requestKey(sid: XiaomiSid, url: string): string {
+        return JSON.stringify([this.username, this.tokenStorePath || "", sid, url]);
+    }
+
     private readonly username: string;
     private readonly password?: string;
     private readonly tokenStorePath?: string;
@@ -1391,6 +1404,12 @@ export class XiaomiAccountClient {
     }
 
     async invalidateSid(sid: XiaomiSid) {
+        for (const key of XiaomiAccountClient.deviceLists.keys()) {
+            const [username, tokenStorePath, cachedSid] = JSON.parse(key);
+            if (username === this.username && tokenStorePath === (this.tokenStorePath || "") && cachedSid === sid) {
+                XiaomiAccountClient.deviceLists.delete(key);
+            }
+        }
         await this.loadTokenStore();
         if (!this.token) {
             return;
@@ -3008,7 +3027,45 @@ export class XiaomiAccountClient {
         await this.runLoginSerialized(sid);
     }
 
-    async miRequest<T = any>(options: {
+    async miRequest<T = any>(
+        options: Parameters<XiaomiAccountClient["performMiRequest"]>[0]
+    ): Promise<T> {
+        const key = this.requestKey(options.sid, options.url);
+        const until = XiaomiAccountClient.requestCooldowns.get(key) || 0;
+        if (until > Date.now()) {
+            throw new Error(`Xiaomi HTTP 429: 请等待 ${Math.ceil((until - Date.now()) / 1000)} 秒后再获取设备列表。`);
+        }
+        XiaomiAccountClient.requestCooldowns.delete(key);
+        const deviceList = new URL(options.url).pathname;
+        if (deviceList !== "/app/home/device_list" && deviceList !== "/admin/v2/device_list") {
+            return this.performMiRequest<T>(options);
+        }
+        const cached = XiaomiAccountClient.deviceLists.get(key);
+        if (cached?.pending) {
+            return structuredClone(await cached.pending);
+        }
+        if (cached && (cached.expiresAt || 0) > Date.now()) {
+            return structuredClone(cached.value);
+        }
+        const entry: { pending?: Promise<T>; value?: T; expiresAt?: number } = {};
+        XiaomiAccountClient.deviceLists.set(key, entry);
+        entry.pending = this.performMiRequest<T>(options);
+        try {
+            const result = await entry.pending;
+            entry.value = structuredClone(result);
+            entry.expiresAt = Date.now() + 60_000;
+            return structuredClone(result);
+        } catch (error) {
+            if (XiaomiAccountClient.deviceLists.get(key) === entry) {
+                XiaomiAccountClient.deviceLists.delete(key);
+            }
+            throw error;
+        } finally {
+            entry.pending = undefined;
+        }
+    }
+
+    private async performMiRequest<T = any>(options: {
         sid: XiaomiSid;
         url: string;
         method?: "GET" | "POST";
@@ -3016,6 +3073,7 @@ export class XiaomiAccountClient {
         headers?: Record<string, string>;
         cookies?: Record<string, string>;
         rawText?: boolean;
+        decodeResponse?: (text: string, response: XiaomiResponseLike) => string;
         allowRelogin?: boolean;
         timeoutMs?: number;
         maxAttempts?: number;
@@ -3183,7 +3241,10 @@ export class XiaomiAccountClient {
             throw new Error(formatNetworkError(fetchError, url));
         }
 
-        const text = await response.text();
+        const responseText = await response.text();
+        const text = response.ok && options.decodeResponse
+            ? options.decodeResponse(responseText, response)
+            : responseText;
         if (traceMinaConversationRequest) {
             await this.trace("mi_request_end", {
                 sid: options.sid,
@@ -3194,6 +3255,27 @@ export class XiaomiAccountClient {
                 body: sanitizeText(text),
             });
         }
+        if (response.status === 429) {
+            let waitSeconds = 30;
+            try {
+                const payload = parseJson(text);
+                const wait = Number(payload?.result?.wait_second);
+                if (Number.isFinite(wait) && wait > 0) {
+                    waitSeconds = wait;
+                }
+            } catch {
+                // A non-JSON 429 still must not invalidate the login session.
+            }
+            const until = Date.now() + Math.ceil(waitSeconds * 1000);
+            XiaomiAccountClient.requestCooldowns.set(this.requestKey(options.sid, options.url), until);
+            await this.trace("mi_request_rate_limited", {
+                sid: options.sid,
+                requestHost,
+                status: 429,
+                waitSeconds,
+            });
+            throw new Error(`Xiaomi HTTP 429: 请等待 ${Math.ceil(waitSeconds)} 秒后再获取设备列表。`);
+        }
         if (!response.ok && (response.status === 401 || response.status === 403)) {
             if (allowRelogin) {
                 await this.trace("mi_request_relogin", {
@@ -3202,7 +3284,7 @@ export class XiaomiAccountClient {
                     status: response.status,
                 });
                 await this.refreshSidSerialized(options.sid, requestSidToken);
-                return this.miRequest<T>({ ...options, allowRelogin: false });
+                return this.performMiRequest<T>({ ...options, allowRelogin: false });
             }
             throw new Error(`Xiaomi request failed for ${url}: HTTP ${response.status} ${text}`);
         }
@@ -3225,7 +3307,7 @@ export class XiaomiAccountClient {
         }
 
         if (!response.ok || isAuthErrorPayload(payload)) {
-            if (allowRelogin) {
+            if (allowRelogin && isAuthErrorPayload(payload)) {
                 await this.trace("mi_request_auth_retry", {
                     sid: options.sid,
                     url,
@@ -3233,7 +3315,7 @@ export class XiaomiAccountClient {
                     payload,
                 });
                 await this.refreshSidSerialized(options.sid, requestSidToken);
-                return this.miRequest<T>({ ...options, allowRelogin: false });
+                return this.performMiRequest<T>({ ...options, allowRelogin: false });
             }
             throw new Error(`Xiaomi request failed for ${url}: ${JSON.stringify(payload)}`);
         }
@@ -3415,6 +3497,28 @@ export class MiNAClient {
     }
 }
 
+// MiGPT's mi-service-lite 3.1.0 uses one RC4 stream for both request fields.
+function cryptMiioPayload(key: Buffer, input: Buffer): Buffer {
+    const state = Array.from({ length: 256 }, (_, index) => index);
+    let j = 0;
+    for (let i = 0; i < 256; i += 1) {
+        j = (j + state[i] + key[i % key.length]) & 255;
+        [state[i], state[j]] = [state[j], state[i]];
+    }
+    let i = 0;
+    j = 0;
+    const output = Buffer.alloc(input.length);
+    for (let offset = 0; offset < 1024 + input.length; offset += 1) {
+        i = (i + 1) & 255;
+        j = (j + state[i]) & 255;
+        [state[i], state[j]] = [state[j], state[i]];
+        if (offset >= 1024) {
+            output[offset - 1024] = input[offset - 1024] ^ state[(state[i] + state[j]) & 255];
+        }
+    }
+    return output;
+}
+
 export class MiIOClient {
     private readonly baseUrl: string;
 
@@ -3434,19 +3538,24 @@ export class MiIOClient {
 
     private signData(uri: string, payload: Record<string, any>, ssecurity: string): Record<string, string> {
         const json = JSON.stringify(payload);
-        const minutesBuffer = Buffer.alloc(4);
-        minutesBuffer.writeUInt32BE(Math.floor(Date.now() / 60000), 0);
-        const nonce = Buffer.concat([randomBytes(8), minutesBuffer]).toString("base64");
+        const nonce = randomBytes(12).toString("base64");
         const signedNonce = this.signNonce(ssecurity, nonce);
-        const message = `${uri}&${signedNonce}&${nonce}&data=${json}`;
-        const signature = createHmac("sha256", Buffer.from(signedNonce, "base64"))
-            .update(message)
-            .digest("base64");
+        const hash = sha1Base64(`POST&${uri}&data=${json}&${signedNonce}`);
+        const dataBuffer = Buffer.from(json);
+        const encrypted = cryptMiioPayload(
+            Buffer.from(signedNonce, "base64"),
+            Buffer.concat([dataBuffer, Buffer.from(hash)])
+        );
+        const data = encrypted.subarray(0, dataBuffer.length).toString("base64");
+        const rc4Hash = encrypted.subarray(dataBuffer.length).toString("base64");
+        const signature = sha1Base64(`POST&${uri}&data=${data}&rc4_hash__=${rc4Hash}&${signedNonce}`);
 
         return {
+            data,
+            rc4_hash__: rc4Hash,
+            signature,
             _nonce: nonce,
-            data: json,
-            signature
+            ssecurity,
         };
     }
 
@@ -3455,6 +3564,7 @@ export class MiIOClient {
         data: Record<string, any>,
         options?: XiaomiRequestOptions
     ): Promise<T> {
+        let responseKey: Buffer;
         return this.account.miRequest<T>({
             sid: "xiaomiio",
             url: `${this.baseUrl}${uri}`,
@@ -3465,11 +3575,33 @@ export class MiIOClient {
                     throw new Error("xiaomiio sid token is missing.");
                 }
                 cookies.PassportDeviceId = token.deviceId;
-                return this.signData(uri, data, sidToken[0]);
+                cookies.countryCode = this.region.toUpperCase();
+                cookies.locale = "zh_CN";
+                cookies.timezone = "GMT+08:00";
+                cookies.timezone_id = "Asia/Shanghai";
+                cookies.cUserId = token.cUserId || "";
+                delete cookies.channel;
+                delete cookies.is_daylight;
+                delete cookies.dst_offset;
+                const encoded = this.signData(uri, data, sidToken[0]);
+                responseKey = Buffer.from(this.signNonce(sidToken[0], encoded._nonce), "base64");
+                return encoded;
             },
             headers: {
                 "User-Agent": MIIO_USER_AGENT,
-                "x-xiaomi-protocal-flag-cli": "PROTOCAL-HTTP2"
+                "x-xiaomi-protocal-flag-cli": "PROTOCAL-HTTP2",
+                "miot-accept-encoding": "GZIP",
+                "miot-encrypt-algorithm": "ENCRYPT-RC4",
+            },
+            decodeResponse: (text, response) => {
+                if (text.trimStart().startsWith("{")) {
+                    return text;
+                }
+                let decoded = cryptMiioPayload(responseKey, Buffer.from(text.trim(), "base64"));
+                if (response.headers?.get("miot-content-encoding")?.toUpperCase() === "GZIP") {
+                    decoded = gunzipSync(decoded);
+                }
+                return decoded.toString("utf8");
             },
             timeoutMs: options?.timeoutMs,
             maxAttempts: options?.maxAttempts,
@@ -3479,7 +3611,7 @@ export class MiIOClient {
     async deviceListFull(): Promise<MiioDeviceInfo[]> {
         const response = await this.miioRequest<{ result?: { list?: MiioDeviceInfo[] } }>("/home/device_list", {
             getVirtualModel: false,
-            getHuamiDevices: 1
+            getHuamiDevices: 0
         });
         return response.result?.list || [];
     }

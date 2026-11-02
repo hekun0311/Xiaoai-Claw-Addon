@@ -1,18 +1,18 @@
 {
   "name": "openclaw-plugin-xiaoai-cloud",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Direct Xiaomi cloud integration for OpenClaw XiaoAi speaker control",
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "main": "dist/index.js",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ZhengXieGang/Xiaoai-Claw-Addon.git"
+    "url": "git+https://github.com/hekun0311/Xiaoai-Claw-Addon.git"
   },
   "bugs": {
-    "url": "https://github.com/ZhengXieGang/Xiaoai-Claw-Addon/issues"
+    "url": "https://github.com/hekun0311/Xiaoai-Claw-Addon/issues"
   },
-  "homepage": "https://github.com/ZhengXieGang/Xiaoai-Claw-Addon#readme",
+  "homepage": "https://github.com/hekun0311/Xiaoai-Claw-Addon#readme",
   "keywords": [
     "openclaw",
     "openclaw-plugin",
@@ -58,12 +58,12 @@
       "./dist/index.js"
     ],
     "compat": {
-      "pluginApi": ">=2026.3.24-beta.2",
-      "minGatewayVersion": "2026.3.24-beta.2"
+      "pluginApi": ">=2026.10.8",
+      "minGatewayVersion": "2026.10.8"
     },
     "build": {
-      "openclawVersion": "2026.4.1",
-      "pluginSdkVersion": "2026.3.24-beta.2"
+      "openclawVersion": "2026.10.8",
+      "pluginSdkVersion": "2026.10.8"
     }
   },
   "scripts": {

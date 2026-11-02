@@ -4714,7 +4714,7 @@ function initConsolePage() {
     }
 
     if (els.toggleDeviceListBtn) {
-      els.toggleDeviceListBtn.disabled = !authenticated;
+      els.toggleDeviceListBtn.disabled = !authenticated || state.deviceListLoading;
       els.toggleDeviceListBtn.textContent = buildDeviceListButtonLabel();
     }
     if (!authenticated && state.deviceListVisible) {
@@ -4795,9 +4795,6 @@ function initConsolePage() {
         state.pendingDeviceSelectionAfterLogin = false;
         setActiveTab("overview", true);
         setDeviceListVisible(true);
-        if (!state.deviceListLoaded) {
-          void loadDeviceList();
-        }
       } else if (ready || !authenticated) {
         state.pendingDeviceSelectionAfterLogin = false;
       }
@@ -5021,14 +5018,13 @@ function initConsolePage() {
   function buildDeviceListButtonLabel() {
     const bootstrap = state.bootstrap || {};
     const authenticated = Boolean(bootstrap.authenticated || bootstrap.ready);
-    const ready = Boolean(bootstrap.ready);
-    if (state.deviceListVisible) {
-      return "收起列表";
+    if (state.deviceListLoading) {
+      return "正在获取…";
     }
     if (!authenticated) {
-      return "登录后选择";
+      return "登录后获取";
     }
-    return ready ? "切换设备" : "选择设备";
+    return state.deviceListLoaded ? "更新设备列表" : "获取设备列表";
   }
 
   function setDeviceListVisible(visible) {
@@ -5038,6 +5034,9 @@ function initConsolePage() {
     }
     if (els.toggleDeviceListBtn) {
       els.toggleDeviceListBtn.textContent = buildDeviceListButtonLabel();
+      const bootstrap = state.bootstrap || {};
+      els.toggleDeviceListBtn.disabled =
+        !(bootstrap.authenticated || bootstrap.ready) || state.deviceListLoading;
     }
   }
 
@@ -5119,6 +5118,7 @@ function initConsolePage() {
       return;
     }
     state.deviceListLoading = true;
+    setDeviceListVisible(true);
     els.deviceList.innerHTML =
       '<div class="empty-state device-empty-state">正在读取设备列表…</div>';
     try {
@@ -5133,6 +5133,7 @@ function initConsolePage() {
       showToast(error.message || String(error), "error");
     } finally {
       state.deviceListLoading = false;
+      setDeviceListVisible(true);
     }
   }
 
@@ -5142,10 +5143,7 @@ function initConsolePage() {
       showToast("请先登录账号，再选择设备。", "error");
       return;
     }
-    setDeviceListVisible(!state.deviceListVisible);
-    if (state.deviceListVisible && !state.deviceListLoaded) {
-      await loadDeviceList();
-    }
+    await loadDeviceList();
   }
 
   async function selectDevice(minaDeviceId) {
@@ -6549,6 +6547,11 @@ function initConsolePage() {
       );
     }
     if (payload.type === "session" && detail.status === "success") {
+      state.deviceItems = [];
+      state.deviceListLoaded = false;
+      if (els.deviceList) {
+        els.deviceList.textContent = "尚未获取设备列表，请点击上方按钮。";
+      }
       state.pendingDeviceSelectionAfterLogin = true;
       closeLoginWorkspace();
       showToast(detail.message || "登录完成。", "success");
@@ -6924,6 +6927,74 @@ function initConsolePage() {
   setComposeMode("chat");
   setDeviceListVisible(false);
   updateVolumeDisplay(0);
+  const speech = Object.fromEntries([
+    "Engine", "ApiKey", "Resource", "Model", "Speaker", "Save", "Test", "ClearKey", "Status", "KeyStatus", "VolcanoFields", "ModelField",
+  ].map(name => [name, byId(`speech${name}`)]));
+  let speechLoaded = false;
+  let speechDirty = false;
+  let speechBusy = false;
+  let speechClearKey = false;
+  function syncSpeechForm() {
+    speech.VolcanoFields.hidden = speech.Engine.value !== "volcano";
+    speech.ModelField.hidden = speech.Resource.value !== "seed-icl-2.0";
+    for (const name of ["Engine", "ApiKey", "Resource", "Model", "Speaker", "ClearKey"]) {
+      speech[name].disabled = speechBusy;
+    }
+    speech.Save.disabled = !speechLoaded || speechBusy;
+    speech.Test.disabled = !speechLoaded || speechBusy || speechDirty;
+    scheduleControlMasonryLayout();
+  }
+  function renderSpeechSettings(settings) {
+    speech.Engine.value = settings.engine;
+    speech.Resource.value = settings.resourceId;
+    speech.Model.value = settings.model;
+    speech.Speaker.value = settings.speaker;
+    speech.ApiKey.value = "";
+    speech.KeyStatus.textContent = settings.hasApiKey ? "密钥已配置，留空保留" : "尚未配置密钥";
+    speechClearKey = false;
+    speechDirty = false;
+  }
+  for (const name of ["Engine", "ApiKey", "Resource", "Model", "Speaker"]) {
+    speech[name].addEventListener("input", () => {
+      if (name === "ApiKey" && speech.ApiKey.value.trim()) speechClearKey = false;
+      speechDirty = true;
+      speech.Status.textContent = "设置已修改，请保存后测试";
+      syncSpeechForm();
+    });
+  }
+  speech.ClearKey.addEventListener("click", () => {
+    speechClearKey = true; speechDirty = true; speech.ApiKey.value = "";
+    speech.KeyStatus.textContent = "待清除；请选择小爱原声后保存";
+    syncSpeechForm();
+  });
+  speech.Save.addEventListener("click", async () => {
+    if (speechBusy) return;
+    speechBusy = true; syncSpeechForm();
+    try {
+      const settings = await postJson(new URL("./api/speech/settings", window.location.href), {
+        engine: speech.Engine.value, apiKey: speech.ApiKey.value, speaker: speech.Speaker.value,
+        resourceId: speech.Resource.value, model: speech.Model.value, clearApiKey: speechClearKey,
+      });
+      renderSpeechSettings(settings);
+      speech.Status.textContent = "音色设置已保存，后续播报立即生效";
+    } catch (error) { speech.Status.textContent = error.message || "保存失败"; }
+    finally { speechBusy = false; syncSpeechForm(); }
+  });
+  speech.Test.addEventListener("click", async () => {
+    if (speechBusy || speechDirty) return;
+    if (!state.bootstrap || !state.bootstrap.ready) { showToast("请先连接音箱", "error"); return; }
+    speechBusy = true; syncSpeechForm(); speech.Status.textContent = "正在测试音色…";
+    try {
+      const result = await postJson(new URL("./api/speech/test", window.location.href), {});
+      speech.Status.textContent = result.message;
+    } catch (error) { speech.Status.textContent = error.message || "音色测试失败"; }
+    finally { speechBusy = false; syncSpeechForm(); }
+  });
+  void apiFetch(new URL("./api/speech/settings", window.location.href)).then(settings => {
+    renderSpeechSettings(settings); speechLoaded = true; speech.Status.textContent = "保存后可点击测试音色";
+  }).catch(error => { speech.Status.textContent = error.message || "语音设置读取失败"; })
+    .finally(syncSpeechForm);
+
   state.hasVolumeSnapshot = false;
   updateDialogWindowDisplay(DEFAULT_DIALOG_WINDOW_SECONDS);
   updateOpenclawContextTokensDisplay(DEFAULT_OPENCLAW_CONTEXT_TOKENS, {

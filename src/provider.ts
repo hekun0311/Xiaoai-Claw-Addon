@@ -1,3 +1,4 @@
+import { SpeechService, SpeechCancelledError } from "./speech.js";
 import path from "path";
 import { chmod, mkdir, readFile, readdir, stat, unlink, utimes, writeFile } from "fs/promises";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
@@ -8,10 +9,8 @@ import { networkInterfaces } from "os";
 import { Readable } from "stream";
 import { fileURLToPath } from "url";
 import { request as httpsRequest } from "https";
-import JSON5 from "json5";
 import { renderConsoleAccessPage, renderConsolePage } from "./console-page.js";
 import {
-    resolveOpenclawConfigPath,
     resolvePluginStorageDir,
 } from "./openclaw-paths.js";
 import { loadGatewayClientCtor } from "./openclaw-gateway-runtime.js";
@@ -2673,15 +2672,7 @@ async function readApiConfig(api: any): Promise<Record<string, any>> {
 }
 
 async function readOpenclawGlobalConfig(api?: any) {
-    try {
-        const raw = await readFile(resolveOpenclawConfigPath({ api }), "utf8");
-        const parsed = JSON5.parse(raw);
-        return parsed && typeof parsed === "object"
-            ? (parsed as Record<string, any>)
-            : undefined;
-    } catch {
-        return undefined;
-    }
+    return api.runtime.config.current() as Record<string, any>;
 }
 
 async function discoverGatewayBaseUrls(api: any): Promise<string[]> {
@@ -3001,6 +2992,8 @@ class XiaoaiCloudPlugin {
     private static sharedRecentSelfTriggeredQueries: RecentSelfTriggeredQuery[] = [];
     private readonly api: any;
     private initPromise?: Promise<void>;
+    private speech?: SpeechService;
+    private speechTest?: Promise<boolean>;
     private config?: PluginConfig;
     private toolsRegistered = false;
     private fullRuntimeRegistrationStarted = false;
@@ -3185,6 +3178,7 @@ class XiaoaiCloudPlugin {
     }
 
     async stopService() {
+        this.speech?.cancel();
         this.serviceGeneration += 1;
         this.stopPolling();
         const startPromise = this.startServicePromise;
@@ -5554,28 +5548,12 @@ class XiaoaiCloudPlugin {
         };
     }
 
-    private readOpenclawAgentListFromConfig(globalConfig: Record<string, any> | undefined) {
-        return Array.isArray(globalConfig?.agents?.list)
-            ? globalConfig.agents.list
-            : undefined;
-    }
-
     private readOpenclawAgentConfig(
         globalConfig: Record<string, any> | undefined,
         agentId: string
     ) {
-        const agentsList = this.readOpenclawAgentListFromConfig(globalConfig);
-        const agentIndex = Array.isArray(agentsList)
-            ? agentsList.findIndex((item) => readString(item?.id) === agentId)
-            : -1;
-        const agentConfig =
-            agentIndex >= 0 && Array.isArray(agentsList)
-                ? agentsList[agentIndex]
-                : undefined;
         return {
-            agentsList,
-            agentIndex,
-            agentConfig,
+            agentConfig: globalConfig?.agents?.entries?.[agentId],
         };
     }
 
@@ -5966,16 +5944,13 @@ class XiaoaiCloudPlugin {
         }
 
         const globalConfig = await readOpenclawGlobalConfig(this.api);
-        const agentsList = this.readOpenclawAgentListFromConfig(globalConfig);
-        const agentIndex = Array.isArray(agentsList)
-            ? agentsList.findIndex((item) => readString(item?.id) === agentId)
-            : -1;
-        if (agentIndex < 0) {
+        const { agentConfig } = this.readOpenclawAgentConfig(globalConfig, agentId);
+        if (!agentConfig) {
             throw new Error(`没有找到 id 为 ${agentId} 的 OpenClaw agent。`);
         }
 
         const previousModel =
-            resolveConfiguredOpenclawModel(agentsList[agentIndex]?.model) ||
+            resolveConfiguredOpenclawModel(agentConfig.model) ||
             modelState.model;
         if (previousModel === nextModel) {
             return {
@@ -5992,7 +5967,7 @@ class XiaoaiCloudPlugin {
                 config.openclawCliPath,
                 "config",
                 "set",
-                `agents.list[${agentIndex}].model`,
+                `agents.entries.${agentId}.model`,
                 JSON.stringify(nextModel),
                 "--strict-json",
             ],
@@ -6018,11 +5993,11 @@ class XiaoaiCloudPlugin {
         const config = await this.loadConfig(false);
         const globalConfig = await readOpenclawGlobalConfig(this.api);
         const agentId = this.resolveManagedOpenclawAgentId(config, globalConfig);
-        const { agentsList, agentIndex, agentConfig } = this.readOpenclawAgentConfig(
+        const { agentConfig } = this.readOpenclawAgentConfig(
             globalConfig,
             agentId
         );
-        if (agentIndex < 0 || !Array.isArray(agentsList)) {
+        if (!agentConfig) {
             throw new Error(`没有找到 id 为 ${agentId} 的 OpenClaw agent。`);
         }
 
@@ -6047,7 +6022,7 @@ class XiaoaiCloudPlugin {
                 config.openclawCliPath,
                 "config",
                 "set",
-                `agents.list[${agentIndex}].contextTokens`,
+                `agents.entries.${agentId}.contextTokens`,
                 JSON.stringify(nextContextTokens),
                 "--strict-json",
             ],
@@ -6504,6 +6479,27 @@ class XiaoaiCloudPlugin {
 
         const action = matchedPath.replace(/^\/api\/?/, "");
         try {
+            if (requestMethod === "GET" && action === "speech/settings") {
+                sendJson(response, 200, await this.getSpeechService().publicSettings());
+                return true;
+            }
+            if (requestMethod === "POST" && action === "speech/settings") {
+                const settings = await this.getSpeechService().save(await readJsonBody(request));
+                sendJson(response, 200, settings);
+                return true;
+            }
+            if (requestMethod === "POST" && action === "speech/test") {
+                if (this.speechTest) throw new HttpError(409, "音色测试正在进行");
+                const task = this.playSelectedText("你好，这是音色测试。", "音色测试");
+                this.speechTest = task;
+                try {
+                    await task;
+                    sendJson(response, 200, { ok: true, message: "测试语音已提交给音箱" });
+                } finally {
+                    if (this.speechTest === task) this.speechTest = undefined;
+                }
+                return true;
+            }
             if (requestMethod === "GET" && action === "bootstrap") {
                 sendJson(
                     response,
@@ -6630,7 +6626,7 @@ class XiaoaiCloudPlugin {
                     return true;
                 }
                 this.clearWaitingForResponse("console_speaker_speak");
-                const ok = await this.playText(text);
+                const ok = await this.playSelectedText(text);
                 if (!ok) {
                     throw new Error("播报失败。");
                 }
@@ -8033,6 +8029,7 @@ class XiaoaiCloudPlugin {
     }
 
     private resetRuntimeState(options?: { preserveVoiceSession?: boolean }) {
+        this.speech?.cancel();
         const preserveVoiceSession = options?.preserveVoiceSession === true;
         this.stopPolling();
         this.initPromise = undefined;
@@ -10346,6 +10343,54 @@ class XiaoaiCloudPlugin {
             miio: this.miioClient,
             mina: this.minaClient,
         };
+    }
+
+    private getSpeechService() {
+        if (!this.speech) this.speech = new SpeechService(path.join(
+            resolvePluginStorageDir({ api: this.api, serviceStateDir: this.serviceStateDir }), "speech-settings.json"
+        ));
+        return this.speech;
+    }
+
+    private async playSelectedText(text: string, title = "语音回答"): Promise<boolean> {
+        const speech = this.getSpeechService();
+        const generation = speech.generation;
+        const assertCurrent = () => {
+            if (!speech.isCurrent(generation)) throw new SpeechCancelledError();
+        };
+        const settings = await speech.publicSettings();
+        assertCurrent();
+        if (settings.engine === "xiaomi") {
+            const accepted = await this.playText(text);
+            if (!accepted) throw new Error("小爱未接受播报");
+            return true;
+        }
+        try {
+            await this.ensureActionContext();
+            const bases = await this.computeSpeakerReachableAudioRelayBaseUrls();
+            if (!bases.length) throw new Error("请先配置音箱可访问的 audioPublicBaseUrl");
+            assertCurrent();
+            const audio = await speech.synthesize(text);
+            assertCurrent();
+            const relay = await this.registerBufferedAudioRelaySource(audio, {
+                extension: ".mp3", contentType: "audio/mpeg", sourceLabel: title,
+                tailPaddingMs: this.getAudioRelayTailPaddingMs(),
+            });
+            assertCurrent();
+            if (!relay) throw new Error("语音音频入口创建失败");
+            const result = await this.playAudioUrl(relay, {
+                title, interrupt: false, armDialogWindow: false,
+                isCurrent: () => speech.isCurrent(generation),
+            });
+            assertCurrent();
+            if (!result.ok) throw new Error("音箱未接受语音音频");
+            return true;
+        } catch (error) {
+            if (error instanceof SpeechCancelledError) throw error;
+            const message = error instanceof Error ? error.message : "语音播放失败";
+            this.recordConsoleEvent("speech.error", "火山播报失败", message, "error");
+            throw error;
+        }
     }
 
     private async playText(text: string) {
@@ -14717,6 +14762,7 @@ class XiaoaiCloudPlugin {
         actionContextPromise?: Promise<ActionContext>,
         session?: ConversationInterceptSession
     ) {
+        if ((await this.getSpeechService().publicSettings()).engine === "volcano") return;
         if (plan.suppressTransitionPrompt) {
             await this.appendDebugTrace("conversation_transition_prompt_skipped", {
                 reason: "suppressed_by_plan",
@@ -16695,7 +16741,7 @@ class XiaoaiCloudPlugin {
             notificationLabel?: string;
         }
     ) {
-        await this.playText(text);
+        await this.playSelectedText(text);
         this.lastOpenclawSpeech = {
             text,
             timeMs: Date.now(),
@@ -17483,6 +17529,7 @@ class XiaoaiCloudPlugin {
         url: string,
         options?: {
             title?: string;
+            isCurrent?: () => boolean;
             interrupt?: boolean;
             ignoreRecentFailure?: boolean;
             armDialogWindow?: boolean;
@@ -17490,6 +17537,10 @@ class XiaoaiCloudPlugin {
             consoleEventTitle?: string;
         }
     ) {
+        const assertCurrent = () => {
+            if (options?.isCurrent && !options.isCurrent()) throw new SpeechCancelledError();
+        };
+        assertCurrent();
         const requestedUrl = this.normalizeAudioPlaybackSourceUrl(url);
         if (!requestedUrl) {
             throw new Error("只支持可直接访问的 http/https 音频 URL，或插件内部已注册的音频 relay。");
@@ -17541,10 +17592,12 @@ class XiaoaiCloudPlugin {
         const inheritedLoopRestoreType = this.readExternalAudioLoopGuard(
             device.minaDeviceId
         )?.restoreLoopType;
+        assertCurrent();
         const preparedSource = await this.prepareSpeakerAudioSource(requestedUrl, {
             title: options?.title,
         });
         if (shouldInterruptCurrentPlayback) {
+            assertCurrent();
             await this.pauseSpeaker().catch(() => false);
         }
         const beforePlayback = this.sanitizeSpeakerPlaybackBaseline(
@@ -17610,11 +17663,13 @@ class XiaoaiCloudPlugin {
             | undefined;
         const attemptDiagnostics: Record<string, any>[] = [];
         const resetSpeakerBeforeAudioRetry = async () => {
+            assertCurrent();
             const fastStopped = await this.stopSpeaker({
                 fast: true,
                 preserveLoopGuard: false,
             }).catch(() => false);
             if (!fastStopped) {
+                assertCurrent();
                 await this.stopSpeaker({
                     preserveLoopGuard: false,
                 }).catch(() => false);
@@ -17659,6 +17714,7 @@ class XiaoaiCloudPlugin {
                     );
                     for (const directType of directTypes) {
                         for (const media of SPEAKER_PLAY_URL_MEDIA_CANDIDATES) {
+                            assertCurrent();
                             const direct = await mina.playerPlayUrl(
                                 device.minaDeviceId,
                                 candidateUrl,
@@ -17791,6 +17847,7 @@ class XiaoaiCloudPlugin {
                     const musicRequest = musicRequests[musicRequestIndex];
                     const hasAlternateAudioType =
                         musicRequestIndex < musicRequests.length - 1;
+                    assertCurrent();
                     const fallback = await mina.playerPlayMusic(
                         device.minaDeviceId,
                         musicRequest.data
@@ -17926,6 +17983,7 @@ class XiaoaiCloudPlugin {
             }
         }
 
+        assertCurrent();
         const detail = this.describeAudioReply(capabilityUrl, options?.title);
         if (!startedWithUrl) {
             if (pendingPlayback) {
@@ -17977,6 +18035,7 @@ class XiaoaiCloudPlugin {
                 if (pendingNeedsResumeNudge) {
                     void (async () => {
                         await sleep(220);
+                        if (options?.isCurrent && !options.isCurrent()) return;
                         const resumed = await this.resumeSpeaker().catch(() => false);
                         await this.appendDebugTrace("audio_playback_pending_resume", {
                             host: mediaUrlHostKey(capabilityUrl),
@@ -18023,6 +18082,7 @@ class XiaoaiCloudPlugin {
                     pending: true,
                 };
             }
+            assertCurrent();
             const cleanedUp = await this.stopSpeaker({ fast: true }).catch(() => false);
             if (cleanedUp) {
                 await this.clearConsoleAudioPlaybackState().catch(() => undefined);
@@ -18225,6 +18285,7 @@ class XiaoaiCloudPlugin {
             });
             if (postStartLoopEnforcementQueued) {
                 void (async () => {
+                    if (options?.isCurrent && !options.isCurrent()) return;
                     const enforcedNonLoopType = await this.setSpeakerLoopType(
                         mina,
                         device.minaDeviceId,
@@ -20036,6 +20097,7 @@ class XiaoaiCloudPlugin {
     }
 
     private async sendTransitionPrompt() {
+        if ((await this.getSpeechService().publicSettings()).engine === "volcano") return;
         const phrases = normalizeTransitionPhrasesInput(this.config?.transitionPhrases, {
             fallbackToDefault: true,
         });
@@ -20241,7 +20303,7 @@ class XiaoaiCloudPlugin {
             }
             this.markActiveVoiceAgentSpoken(joined, activeRun.sessionKey);
             this.cancelInterceptForActiveVoiceRun(activeRun, "voice_text_payload_started");
-            await this.playText(joined);
+            await this.playSelectedText(joined);
             this.lastOpenclawSpeech = {
                 text: joined,
                 timeMs: Date.now(),
@@ -20880,6 +20942,7 @@ class XiaoaiCloudPlugin {
         }
     ) {
         const deviceId = this.device?.minaDeviceId;
+        this.speech?.cancel();
         const interceptSession = this.createConversationInterceptSession(deviceId);
         const interceptStartedAtMs = interceptSession.startedAtMs;
         this.armFastPolling();

@@ -2,7 +2,7 @@
   "id": "openclaw-plugin-xiaoai-cloud",
   "name": "Xiaoai Speaker Cloud Plugin",
   "description": "OpenClaw 直连小米账号/米家云的小爱音箱语音播报与唤醒拦截插件。",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "activation": {
     "onStartup": true
   },
