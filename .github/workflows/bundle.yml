@@ -44,6 +44,12 @@ jobs:
       - name: Build plugin
         run: npm run build
 
+      - name: Verify speech and existing device behavior without live calls
+        run: node --test tests/speech.mjs tests/xiaomi-rate-limit.mjs tests/manual-device-list.mjs tests/openclaw-agent-entries.mjs
+
+      - name: Verify managed deployment rollback and registration
+        run: python3 deploy/1panel/test_deploy.py
+
       - name: Verify publishable package
         run: npm pack --dry-run
 

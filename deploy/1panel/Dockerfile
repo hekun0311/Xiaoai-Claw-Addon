@@ -8,6 +8,7 @@ RUN npm ci && npm run build && npm prune --omit=dev
 COPY openclaw.plugin.json README.md ./
 COPY assets ./assets
 COPY scripts ./scripts
+COPY installers ./installers
 RUN rm -rf src tsconfig.json index.ts
 
 FROM ${OPENCLAW_BASE}
