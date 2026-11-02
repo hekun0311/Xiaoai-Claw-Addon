@@ -36,6 +36,29 @@ class DeployTests(unittest.TestCase):
         d.register(file)
         self.assertEqual(file.read_text(encoding='utf-8'), original + d.ENTRY + '\n')
 
+    def test_load_model_accepts_inherited_image_healthcheck_without_changing_compose(self):
+        model = copy.deepcopy(self.model)
+        model['services'][d.SERVICE]['container_name'] = d.CONTAINER
+        old = {'Config': {'Labels': {'com.docker.compose.project': 'openclaw-xiaoai',
+                                    'com.docker.compose.service': d.SERVICE,
+                                    'com.docker.compose.config-hash': 'hash'},
+                          'Cmd': model['services'][d.SERVICE]['command'],
+                          'Healthcheck': {'Test': ['CMD', 'node', 'dist/docker-healthcheck.js']}},
+               'Mounts': [{'Destination': '/home/node/.openclaw', 'Type': 'bind', 'RW': True}]}
+        def config(*args):
+            return d.SERVICE + ' hash\n' if '--hash' in args else json.dumps(model)
+        with patch.object(d, 'compose', side_effect=config):
+            self.assertEqual(d.load_model(old), model)
+            self.assertNotIn('healthcheck', model['services'][d.SERVICE])
+            for health in ({}, {'Test': ['NONE']}):
+                old['Config']['Healthcheck'] = health
+                with self.assertRaisesRegex(d.DeployError, '健康检查'):
+                    d.load_model(old)
+            old['Config']['Healthcheck'] = {'Test': ['CMD', 'node', 'health.js']}
+            model['services'][d.SERVICE]['healthcheck'] = {'disable': True}
+            with self.assertRaisesRegex(d.DeployError, '健康检查'):
+                d.load_model(old)
+
     def test_candidate_preserves_every_service_setting_except_image_and_plugin_overlay(self):
         previous = copy.deepcopy(self.model)
         model = d.candidate_model(previous, 'new:git', Path('/releases/one'))

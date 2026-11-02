@@ -89,8 +89,10 @@ def load_model(old):
     service = model['services'][SERVICE]
     if service.get('container_name') != CONTAINER:
         raise DeployError('容器名称与现有部署不一致。')
-    if not service.get('healthcheck') or service['healthcheck'].get('disable'):
-        raise DeployError('现有 Compose 未配置容器健康检查，停止迁移。')
+    # Compose 可以省略 healthcheck 并继承镜像定义，以运行容器的有效配置为准。
+    health_test = (old['Config'].get('Healthcheck') or {}).get('Test') or []
+    if service.get('healthcheck', {}).get('disable') or not health_test or health_test[0] == 'NONE':
+        raise DeployError('运行容器没有有效健康检查（含镜像继承），停止迁移。')
     command = old['Config'].get('Cmd') or []
     if '--port' not in command or command[command.index('--port') + 1:command.index('--port') + 2] != ['18789']:
         raise DeployError('当前网关端口不是已验证的 18789，停止迁移。')
